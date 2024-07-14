@@ -1,4 +1,4 @@
-# Getting Crypto BTC-UST K-lines from Cryptocurrency Exchange with Apache Airflow and Spark.
+# Getting product data from tiki.vn then load to pgsql with Apache Airflow and Spark.
 
 Using airflow to schedule spark jobs to run daily to get products information from tiki.vn.
 
