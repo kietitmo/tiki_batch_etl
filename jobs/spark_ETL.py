@@ -1,5 +1,5 @@
 import requests
-import random
+from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col
 import json
@@ -74,11 +74,22 @@ def get_all_reviews_all_product(products_id):
     return all_reviews
 
 # Write to database postgres on site Neon.tech
+# Define the write function
 def write_to_pg(df, table_name):
-    df.write.format("jdbc")\
-        .option("url", "jdbc:postgresql://ep-small-salad-a2sbsxpd.eu-central-1.aws.neon.tech/brazilian_ecommerce") \
-        .option("driver", "org.postgresql.Driver").option("dbtable", table_name) \
-        .option("user", "brazilian_ecommerce_owner").option("password", "xQI5TMXN3COU").save()
+    jdbc_url = "jdbc:postgresql://tiki_batch-db-1:5433/tiki_db"
+    jdbc_properties = {
+        "user": "username",
+        "password": "password",
+        "driver": "org.postgresql.Driver"
+    }
+    
+    if table_name == "products_prices":
+        df.write.jdbc(url=jdbc_url, table=table_name, mode="append", properties=jdbc_properties)
+    else:
+        existing_df = spark.read.jdbc(url=jdbc_url, table=table_name, properties=jdbc_properties)
+        df_new = df.join(existing_df, df.id == existing_df.id, "left_anti")
+        df_new.write.jdbc(url=jdbc_url, table=table_name, mode="append", properties=jdbc_properties)
+
     
 if __name__ == "__main__":
     # get all product ids
@@ -104,8 +115,6 @@ if __name__ == "__main__":
 
     df_2 = df.select('id', 'brand', 'categories', 'name', 'price', 'list_price', 'original_price', 'description', 'current_seller', 'quantity_sold', 'stock_item')
     
-    from pyspark.sql.functions import explode, col
-
     # DataFrame chứa thông tin sản phẩm
     products_df = df_2.select(
                             col("id").alias('id'),
@@ -116,7 +125,15 @@ if __name__ == "__main__":
                             col("description"), 
                             col("brand.id").alias('brand_id'), 
                             col('categories.id').alias('category_id')
-                        )
+                        ).distinct()
+
+    #daily prices
+    products_prices_df = df_2.select(
+                                col("id").alias('product_id'),
+                                col("price"), 
+                                col("list_price"), 
+                                col("original_price")
+                            ).withColumn("current_date", datetime.today())
 
     # DataFrame chứa thông tin thương hiệu
     brands_df = df_2.select(col('brand.id').alias('brand_id'), 
@@ -156,10 +173,21 @@ if __name__ == "__main__":
     # Hiển thị schema và dữ liệu
     df_rv.printSchema()
 
-    comments = df_rv.selectExpr("id", "title", "created_at", "rating", "product_id", "status", "customer_id")
+    comments_df = df_rv.selectExpr("id", "title", "created_at", "rating", "product_id", "status", "customer_id")
 
-    customers = df_rv.select(col('created_by.id').alias('id'), 
+    customers_df = df_rv.select(col('created_by.id').alias('customer_id'), 
                          col('created_by.name').alias('name'),
                          col('created_by.full_name').alias('fullname'),
                          col('created_by.region').alias('region'),
                          col('created_by.created_time').alias('created_time'))
+    
+    # Write into pgsql
+    write_to_pg(products_df, 'products')
+    write_to_pg(products_prices_df, 'products_prices')
+    write_to_pg(brands_df, 'brands')
+    write_to_pg(categories_df, 'categories')
+    write_to_pg(sellers_df, 'sellers')
+    write_to_pg(sellers_products_df, 'sellers_products')
+    write_to_pg(stock_items_df, 'stock_items')
+    write_to_pg(comments_df, 'comments')
+    write_to_pg(customers_df, 'customers')
