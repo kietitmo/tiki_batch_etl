@@ -1,0 +1,4 @@
+airflow-data/logs/
+airflow-data/plugins/
+dags/__pycache__
+users_postgres_data
