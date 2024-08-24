@@ -10,7 +10,7 @@ from airflow.utils.email import send_email
 from datetime import datetime
 
 dag = DAG(
-    dag_id = "crypto_sparking_flow",
+    dag_id = "Tiki_batching_flow",
     default_args = {
         "owner": "Kiet Nguyen",
         "start_date": days_ago(1),
@@ -30,6 +30,10 @@ tiki_flow = SparkSubmitOperator(
     application="jobs/spark_ETL.py",
     email_on_failure=True,
     email='sirtuankiet@gmail.com',
+    conf={
+            "spark.jars.packages": "org.postgresql:postgresql:42.6.2",
+            # Other Spark configurations
+        },
     dag=dag
 )
 
