@@ -1,10 +1,10 @@
+import psycopg2
 import requests
 from datetime import datetime
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col
-from pyspark.sql.functions import current_date
-from pyspark.sql.functions import from_unixtime
+from pyspark.sql.functions import col, from_unixtime, lit, date_format
 
+import datetime
 import json
 import time
 import random
@@ -30,15 +30,6 @@ def get_product_detail(id):
 def get_reviews(page, id):
     res = requests.get(f'https://tiki.vn/api/v2/reviews?limit=5&include=comments&page={page}&product_id={id}', headers=headers, timeout=10)
     return res
-
-# def get_all_product_detail(product_id):
-#     print(f'GETTING ALL PRODUCT DETAIL BY ID')
-#     product_detail = []
-#     for id in product_id:
-#         product_detail.append(get_product_detail(id).json())
-#         print(f'Getting product with ID: ', id)
-#     print(f'GETTING ALL PRODUCT DETAIL SUCCESSFUL!!!')
-#     return product_detail
 
 def get_all_product_detail(product_id, batch_size=10, delay=5):
     print(f'GETTING ALL PRODUCT DETAIL BY ID')
@@ -92,12 +83,6 @@ def get_all_product_reviews(product_id):
     print(f'GETTING ALL PRODUCT REVIEWS SUCCESSFUL!!!')
     return product_reviews
 
-# def get_all_reviews_all_product(products_id):
-#     all_reviews = []
-#     for id in products_id:
-#         all_reviews.extend(get_all_product_reviews(id))
-#     return all_reviews
-
 def get_all_reviews_all_product(products_id, batch_size=10, delay=5):
     all_reviews = []
     
@@ -117,9 +102,77 @@ def get_all_reviews_all_product(products_id, batch_size=10, delay=5):
     print(f'GETTING ALL REVIEWS FOR ALL PRODUCTS SUCCESSFUL!!!')
     return all_reviews
 
-# Write to database postgres on site Neon.tech
-# Define the write function
-def write_to_pg(df, table_name, schema='public'):
+def create_all_table_if_not_exists():
+    create_all_tables_sql = """
+        CREATE TABLE IF NOT EXISTS dim_products (
+            product_id BIGINT PRIMARY KEY,
+            name VARCHAR,
+            price FLOAT,
+            list_price FLOAT,
+            original_price FLOAT,
+            description VARCHAR,
+            category_id BIGINT,
+            brand_name VARCHAR,
+            category_name VARCHAR
+        );
+
+        CREATE TABLE IF NOT EXISTS dim_sellers (
+            seller_id BIGINT PRIMARY KEY,
+            seller_link VARCHAR,
+            seller_logo VARCHAR,
+            seller_name VARCHAR,
+            store_id BIGINT
+        );
+
+        CREATE TABLE IF NOT EXISTS dim_customers (
+            customer_id BIGINT PRIMARY KEY,
+            name VARCHAR,
+            fullname VARCHAR,
+            region VARCHAR,
+            created_time TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS dim_date (
+            date_id BIGINT PRIMARY KEY,    
+            date DATE,                    
+            year INT,
+            month INT,
+            day INT,
+            weekday VARCHAR(10),          
+            day_of_week INT,         
+            week_of_year INT,
+            quarter INT,
+            is_weekend BOOLEAN
+        );
+
+        CREATE TABLE IF NOT EXISTS fact_daily_products_prices (
+            product_id BIGINT,
+            price FLOAT,
+            list_price FLOAT,
+            original_price FLOAT,
+            stock_qty BIGINT,
+            quantity_sold BIGINT,
+            seller_id BIGINT,
+            date_id BIGINT
+        );
+
+        CREATE TABLE IF NOT EXISTS fact_reviews (
+            review_id BIGINT PRIMARY KEY,
+            customer_id BIGINT,
+            product_id BIGINT,
+            seller_id BIGINT,
+            rating BIGINT,
+            thank_count BIGINT,
+            date_id BIGINT
+        );
+        """
+    
+    for query in create_all_tables_sql.split(";"):
+        if query.strip():
+            spark.sql(query)
+
+
+def upsert_dim_to_pg(df, table_name, schema='public'):
     jdbc_url = "jdbc:postgresql://db:5432/tiki_db"
     jdbc_properties = {
         "user": "username",
@@ -127,143 +180,115 @@ def write_to_pg(df, table_name, schema='public'):
         "driver": "org.postgresql.Driver"
     }
 
-    # Define table creation SQL commands
-    create_table_sql = {
-        'products': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.products (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(255),
-            price DECIMAL(10, 2),
-            list_price DECIMAL(10, 2),
-            original_price DECIMAL(10, 2),
-            description TEXT,
-            brand_id INTEGER,
-            category_id INTEGER
-        );
-        """,
-        'products_prices': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.products_prices (
-            product_id INTEGER,
-            price DECIMAL(10, 2),
-            list_price DECIMAL(10, 2),
-            original_price DECIMAL(10, 2),
-            current_date_column DATE
-        );
-        """,
-        'brands': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.brands (
-            brand_id INTEGER PRIMARY KEY,
-            brand_name VARCHAR(255),
-            brand_slug VARCHAR(255)
-        );
-        """,
-        'categories': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.categories (
-            category_id INTEGER PRIMARY KEY,
-            category_is_leaf BOOLEAN,
-            category_name VARCHAR(255)
-        );
-        """,
-        'sellers': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.sellers (
-            seller_id INTEGER PRIMARY KEY,
-            seller_link VARCHAR(255),
-            seller_logo VARCHAR(255),
-            seller_name VARCHAR(255),
-            store_id INTEGER
-        );
-        """,
-        'sellers_products': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.sellers_products (
-            seller_id INTEGER,
-            product_id INTEGER
-        );
-        """,
-        'stock_items': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.stock_items (
-            product_id INTEGER PRIMARY KEY,
-            stock_max_sale_qty INTEGER,
-            stock_min_sale_qty INTEGER,
-            stock_preorder_date DATE,
-            stock_qty INTEGER
-        );
-        """,
-        'comments': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.comments (
-            id INTEGER PRIMARY KEY,
-            title TEXT,
-            created_at TIMESTAMP,
-            rating INTEGER,
-            product_id INTEGER,
-            status VARCHAR(50),
-            customer_id INTEGER
-        );
-        """,
-        'customers': f"""
-        CREATE TABLE IF NOT EXISTS {schema}.customers (
-            customer_id INTEGER PRIMARY KEY,
-            name VARCHAR(255),
-            fullname VARCHAR(255),
-            region VARCHAR(255),
-            created_time TIMESTAMP
-        );
-        """
+    primary_keys = {
+        "dim_products": "product_id",
+        "dim_sellers": "seller_id",
+        "dim_customers": "customer_id",
+        "fact_reviews": "review_id"
+    }
+
+    full_table_name = f"{schema}.{table_name}"
+    primary_key_col = primary_keys.get(table_name, "id")
+
+    # Write DataFrame to a staging table
+    staging_table_name = f"{schema}.{table_name}_staging"
+    df.write.jdbc(url=jdbc_url, table=staging_table_name, mode="overwrite", properties=jdbc_properties)
+
+    # Perform upsert using raw SQL
+    with psycopg2.connect(jdbc_url, user="username", password="password") as conn:
+        with conn.cursor() as cur:
+            upsert_sql = f"""
+            INSERT INTO {full_table_name} ({', '.join(df.columns)})
+            SELECT {', '.join(df.columns)}
+            FROM {staging_table_name} AS staging
+            ON CONFLICT ({primary_key_col})
+            DO UPDATE SET {', '.join([f"{col} = EXCLUDED.{col}" for col in df.columns if col != primary_key_col])};
+            """
+            cur.execute(upsert_sql)
+            conn.commit()
+
+    # Drop the staging table
+    with psycopg2.connect(jdbc_url, user="username", password="password") as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {staging_table_name}")
+            conn.commit()
+
+
+# Write to database postgres on site Neon.tech
+# Define the write function
+def write_fact_to_pg(df, table_name, schema='public'):
+    jdbc_url = "jdbc:postgresql://db:5432/tiki_db"
+    jdbc_properties = {
+        "user": "username",
+        "password": "password",
+        "driver": "org.postgresql.Driver"
     }
 
     # Dictionary to map table names to their primary key columns
-    primary_keys = {
-        "products": "id",
-        "products_prices": "product_id",
-        "brands": "brand_id",
-        "categories": "category_id",
-        "sellers": "seller_id",
-        "sellers_products": ["seller_id", "product_id"],
-        "stock_items": "product_id",
-        "comments": "id",
-        "customers": "customer_id"
-    }
-
-    # Function to execute SQL command
-    def execute_sql_command(sql_command):
-        import psycopg2
-        from psycopg2 import sql
-        try:
-            conn = psycopg2.connect(
-                dbname="tiki_db",
-                user="username",
-                password="password",
-                host="db",
-                port="5432"
-            )
-            cur = conn.cursor()
-            cur.execute(sql.SQL(sql_command))
-            conn.commit()
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print(f"Error executing SQL command: {e}")
-
-    # Create table if it does not exist
-    if table_name in create_table_sql:
-        execute_sql_command(create_table_sql[table_name])
-
-    # Write DataFrame to PostgreSQL
-    full_table_name = f"{schema}.{table_name}"
-
-    # Get primary key column(s) for the current table
-    primary_key_col = primary_keys.get(table_name, "id")  # Default to 'id' if table_name not found
 
     # Handle single primary key
-    if table_name == "products_prices":
-        df.write.jdbc(url=jdbc_url, table=full_table_name, mode="append", properties=jdbc_properties)
+    if table_name == "fact_price_daily":
+        df.write.jdbc(url=jdbc_url, table='fact_price_daily', mode="append", properties=jdbc_properties)
     else:
-        # Join to find new rows not in existing data
-        existing_df = spark.read.jdbc(url=jdbc_url, table=full_table_name, properties=jdbc_properties)
-        df_new = df.join(existing_df, on=primary_key_col, how="left_anti")
-        # Filter out rows where the primary key is null, to prevent errors during insertion
-        df_new = df_new.filter(df[primary_key_col].isNotNull())
-        df_new.write.jdbc(url=jdbc_url, table=full_table_name, mode="append", properties=jdbc_properties)
+        upsert_dim_to_pg(df, "fact_reviews")
 
+
+def add_dim_date():
+    jdbc_url = "jdbc:postgresql://db:5432/tiki_db"
+    jdbc_properties = {
+        "user": "username",
+        "password": "password",
+        "driver": "org.postgresql.Driver"
+    }
+    current_date = datetime.date.today()
+
+    dim_date_df = spark.read.jdbc(url=jdbc_url, table='dim_date', properties=jdbc_properties)
+
+    if dim_date_df.filter(col("date") == lit(current_date)).count() == 0:
+        date_id = int(current_date.strftime("%Y%m%d"))
+        new_row = spark.createDataFrame(
+            [(date_id,
+            current_date,
+            current_date.year,
+            current_date.month,
+            current_date.day,
+            current_date.strftime("%A"),
+            current_date.isoweekday(),
+            current_date.isocalendar()[1],
+            (current_date.month - 1) // 3 + 1,
+            1 if current_date.isoweekday() in [6, 7] else 0)],
+            ["date_id", "date", "year", "month", "day", "weekday", "day_of_week", "week_of_year", "quarter", "is_weekend"]
+        )
+
+        new_row.write.jdbc(url=jdbc_url, table='dim_date', mode="append", properties=jdbc_properties)
+    return date_id
+
+def add_dim_date_from_timestamp(created_at_timestamp):
+    jdbc_url = "jdbc:postgresql://db:5432/tiki_db"
+    jdbc_properties = {
+        "user": "username",
+        "password": "password",
+        "driver": "org.postgresql.Driver"
+    }
+    created_at_datetime = datetime.utcfromtimestamp(from_unixtime(created_at_timestamp))
+    dim_date_df = spark.read.jdbc(url=jdbc_url, table='dim_date', properties=jdbc_properties)
+
+    year = created_at_datetime.year
+    month = created_at_datetime.month
+    day = created_at_datetime.day
+    weekday = created_at_datetime.strftime('%A')  # Ví dụ: 'Monday'
+    day_of_week = created_at_datetime.weekday() + 1  # Monday = 1, Sunday = 7
+    week_of_year = created_at_datetime.isocalendar()[1]
+    quarter = (month - 1) // 3 + 1  # Tính toán quý
+    is_weekend = 1 if created_at_datetime.isoweekday() in [6, 7] else 0
+    date_id = int(f"{year:04d}{month:02d}{day:02d}")
+
+    if dim_date_df.filter(dim_date_df.date_id == date_id).count() == 0:
+        new_row = [(date_id, created_at_datetime.date(), year, month, day, weekday, day_of_week, week_of_year, quarter, is_weekend)]
+        new_date_df = spark.createDataFrame(new_row, schema=["date_id", "date", "year", "month", "day", "weekday", "day_of_week", "week_of_year", "quarter", "is_weekend"])
+        new_date_df.write.jdbc(url=jdbc_url, table='dim_date', mode="append", properties=jdbc_properties)
+    
+    return date_id
 
     
 if __name__ == "__main__":
@@ -293,51 +318,36 @@ if __name__ == "__main__":
     df_2 = df.select('id', 'brand', 'categories', 'name', 'price', 'list_price', 'original_price', 'description', 'current_seller', 'quantity_sold', 'stock_item')
     
     # DataFrame chứa thông tin sản phẩm
-    products_df = df_2.select(
-                            col("id").alias('id'),
+    dim_products_df = df_2.select(
+                            col("id").alias('product_id'),
                             col("name"), 
                             col("price"), 
                             col("list_price"), 
                             col("original_price"), 
                             col("description"), 
-                            col("brand.id").alias('brand_id'), 
-                            col('categories.id').alias('category_id')
+                            col('categories.id').alias('category_id'),
+                            col('brand.name').alias('brand_name'),
+                            col('categories.name').alias('category_name')
                         ).distinct()
 
     # Daily prices
-    products_prices_df = df_2.select(
+    fact_daily_products_prices_df = df_2.select(
         col("id").alias('product_id'),
         col("price"), 
         col("list_price"), 
-        col("original_price")
-    ).withColumn("current_date_column", current_date().cast("date"))
-
-    # DataFrame chứa thông tin thương hiệu
-    brands_df = df_2.select(col('brand.id').alias('brand_id'), 
-                            col('brand.name').alias('brand_name'),
-                            col('brand.slug').alias('brand_slug')).distinct()
-
-    # # DataFrame chứa thông tin danh mục
-    categories_df = df_2.select(col('categories.id').alias('category_id'),
-                                col('categories.is_leaf').alias('category_is_leaf'),
-                                col('categories.name').alias('category_name')).distinct()
+        col("original_price"),
+        col('stock_item.qty').alias('stock_qty'),
+        col("quantity_sold"),
+        col('current_seller.id').alias('seller_id')
+    ).withColumn("date_id", add_dim_date())
 
     # # DataFrame chứa thông tin người bán
-    sellers_df = df_2.select(col('current_seller.id').alias('seller_id'),
+    dim_sellers_df = df_2.select(col('current_seller.id').alias('seller_id'),
                             col('current_seller.link').alias('seller_link'),
                             col('current_seller.logo').alias('seller_logo'),
                             col('current_seller.name').alias('seller_name'),
                             col('current_seller.store_id').alias('store_id')).distinct()
 
-    # sellers_products_df = df_2.select(col('current_seller.id').alias('seller_id'),
-    #                                 col('current_seller.product_id').alias('product_id')).distinct()
-
-    # # DataFrame chứa thông tin kho hàng
-    stock_items_df = df_2.select(col('id').alias('product_id'),
-                                col('stock_item.max_sale_qty').alias('stock_max_sale_qty'),
-                                col('stock_item.min_sale_qty').alias('stock_min_sale_qty'),
-                                col('stock_item.preorder_date').cast('date').alias('stock_preorder_date'),
-                                col('stock_item.qty').alias('stock_qty')).distinct()
 
     # get all reviews of all products
     # all_reviews = get_all_reviews_all_product(product_id)
@@ -353,18 +363,7 @@ if __name__ == "__main__":
     # Hiển thị schema và dữ liệu
     df_rv.printSchema()
 
-    # comments_df = df_rv.selectExpr("id", "title", "created_at", "rating", "product_id", "status", "customer_id")
-    comments_df = df_rv.select(
-        col('id').alias('id'), 
-        col('title').alias('title'),
-        col('rating').alias('rating'),
-        col('product_id').alias('product_id'),
-        col('status').alias('status'),
-        col('customer_id').alias('customer_id'),
-        from_unixtime(col('created_at')).cast('timestamp').alias('created_at')).distinct()
-
-
-    customers_df = df_rv.select(
+    dim_customers_df = df_rv.select(
         col('created_by.id').alias('customer_id'), 
         col('created_by.name').alias('name'),
         col('created_by.full_name').alias('fullname'),
@@ -372,14 +371,21 @@ if __name__ == "__main__":
         from_unixtime(col('created_by.created_time')).cast('timestamp').alias('created_time')
     ).distinct()
 
+    fact_review_df = df_rv.select(
+        col('id').alias('review_id'),
+        col('customer_id'),
+        col('product_id'),
+        col('seller.id').alias('seller_id'),
+        col('rating'),
+        col('thank_count'),
+    ).withColumn("date_id", add_dim_date_from_timestamp(col('created_at')))
     
+    create_all_table_if_not_exists()
+
     # Write into pgsql
-    write_to_pg(products_df, 'products')
-    write_to_pg(products_prices_df, 'products_prices')
-    write_to_pg(brands_df, 'brands')
-    write_to_pg(categories_df, 'categories')
-    # write_to_pg(sellers_df, 'sellers')
-    # write_to_pg(sellers_products_df, 'sellers_products')
-    write_to_pg(stock_items_df, 'stock_items')
-    write_to_pg(comments_df, 'comments')
-    write_to_pg(customers_df, 'customers')
+    upsert_dim_to_pg(dim_products_df, 'dim_products')
+    upsert_dim_to_pg(dim_sellers_df, 'dim_sellers')
+    upsert_dim_to_pg(dim_customers_df, 'dim_customers')
+    
+    write_fact_to_pg(fact_daily_products_prices_df, 'fact_price_daily')
+    write_fact_to_pg(fact_review_df, 'fact_reviews')
