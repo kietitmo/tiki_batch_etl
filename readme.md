@@ -5,7 +5,7 @@ Using airflow to schedule spark jobs to run daily to get products information fr
 ![pipeline](./assets/photos/etl.png)
 
 ### Data warehouse design:
-Starschema with 2 fact tables, 3 dim tables (photo below)
+Constellation Schema with 2 fact tables, 3 dim tables. It can be said that it is a combination of 2 star schemas. (photo below)
 
 ![db](./assets/photos/star-schema-dwh.png)
 
