@@ -1,6 +1,6 @@
 # Getting product data from tiki.vn then load to pgsql with Apache Airflow and Spark.
 
-Using airflow to schedule spark jobs to run daily to get products information from tiki.vn.
+Using airflow to schedule spark jobs to run daily to get products price information (of 1 category) from tiki.vn.
 
 ![pipeline](./assets/photos/etl.png)
 
